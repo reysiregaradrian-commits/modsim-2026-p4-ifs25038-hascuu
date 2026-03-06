@@ -1,3 +1,8 @@
+# ============================================
+# APLIKASI STREAMLIT - SIMULASI TANGKI AIR
+# Praktikum Pemodelan dan Simulasi - Modul 4
+# ============================================
+
 import numpy as np
 from scipy.integrate import solve_ivp
 import streamlit as st
@@ -12,59 +17,50 @@ import math
 # 1. KONFIGURASI & SETUP
 # ====================
 
+st.set_page_config(
+    page_title="Simulasi Tangki Air",
+    page_icon="💧",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 @dataclass
 class TankConfig:
-    """Konfigurasi parameter water tank"""
+    """Konfigurasi parameter tangki air"""
     
-    # Parameter geometri tank (silinder vertikal)
-    tank_height: float = 3.0          # m
-    tank_diameter: float = 2.0         # m
-    tank_area: float = field(init=False, default=None)  # m²
+    # Dimensi tangki
+    tank_height: float = 2.0      # meter
+    tank_radius: float = 1.0       # meter
     
-    # Parameter pipa
-    inlet_diameter: float = 0.15       # m (diperbesar)
-    inlet_area: float = field(init=False, default=None)  # m²
-    outlet_diameter: float = 0.15      # m (diperbesar)
-    outlet_area: float = field(init=False, default=None) # m²
+    # Debit aliran
+    inlet_flow_rate: float = 0.05  # m³/detik
+    outlet_flow_rate: float = 0.03  # m³/detik
     
-    # Parameter aliran
-    inlet_velocity: float = 2.0        # m/s (dipercepat)
-    outlet_velocity: float = 2.0       # m/s (dipercepat)
+    # Kondisi awal
+    initial_height: float = 0.0     # meter
     
-    # Parameter fisik
-    initial_height: float = 0.5         # m
-    g: float = 9.81                     # m/s²
-    rho_water: float = 1000.0           # kg/m³
+    # Parameter simulasi
+    simulation_time: float = 300.0  # detik
+    time_step: float = 1.0           # detik
     
-    # Koefisien losses
-    discharge_coeff: float = 0.6         # koefisien discharge
-    
-    # Parameter kontrol
-    pump_on: bool = True
-    valve_open: bool = True
-    
-    # Parameter simulasi (diperbesar)
-    simulation_time: float = 600.0       # detik (10 menit)
-    time_step: float = 1.0                # detik
+    # Atribut yang dihitung
+    tank_area: float = field(init=False, default=None)
+    max_volume: float = field(init=False, default=None)
     
     def __post_init__(self):
         """Validasi konfigurasi dan hitung atribut turunan"""
-        self.tank_area = math.pi * (self.tank_diameter/2)**2
-        self.inlet_area = math.pi * (self.inlet_diameter/2)**2
-        self.outlet_area = math.pi * (self.outlet_diameter/2)**2
+        self.tank_area = math.pi * (self.tank_radius ** 2)
         self.max_volume = self.tank_area * self.tank_height
-        
+        if self.inlet_flow_rate <= 0 and self.outlet_flow_rate <= 0:
+            st.warning("Peringatan: Kedua debit bernilai nol, tidak ada aliran!")
         if self.initial_height > self.tank_height:
-            st.warning("⚠️ Peringatan: Ketinggian awal melebihi tinggi tank")
-        if self.initial_height < 0:
-            st.warning("⚠️ Peringatan: Ketinggian awal tidak boleh negatif")
+            st.warning("Peringatan: Ketinggian awal melebihi tinggi tangki!")
     
     def copy(self):
         """Buat salinan konfigurasi"""
         params = {k: v for k, v in self.__dict__.items() 
-                 if k not in ['tank_area', 'inlet_area', 'outlet_area', 'max_volume']}
-        new_config = TankConfig(**params)
-        return new_config
+                  if k not in ['tank_area', 'max_volume']}
+        return TankConfig(**params)
     
     def update_parameter(self, parameter_name: str, value: float):
         """Update satu parameter dan hitung ulang atribut turunan"""
@@ -74,117 +70,100 @@ class TankConfig:
         else:
             raise ValueError(f"Parameter {parameter_name} tidak valid")
 
+
 # ====================
 # 2. MODEL FISIKA
 # ====================
 
-class WaterTankPhysics:
-    """Model fisika untuk water tank"""
+class PhysicsModel:
+    """Model fisika untuk aliran air dalam tangki"""
     
     def __init__(self, config: TankConfig):
         self.config = config
     
-    def inlet_flow_rate(self, water_height: float) -> float:
-        """Hitung laju aliran masuk (m³/s)"""
-        if not self.config.pump_on:
-            return 0.0
-            
-        if water_height >= self.config.tank_height - 0.01:
-            return 0.0
-            
-        return self.config.inlet_area * self.config.inlet_velocity
+    def net_flow_rate(self, height: float) -> float:
+        """Hitung debit bersih (inlet - outlet) dengan mempertimbangkan batas tangki"""
+        
+        # Jika tangki penuh, inlet berhenti (air meluap)
+        if height >= self.config.tank_height:
+            q_in = 0.0
+        else:
+            q_in = self.config.inlet_flow_rate
+        
+        # Jika tangki kosong, outlet berhenti (tidak ada air)
+        if height <= 0:
+            q_out = 0.0
+        else:
+            q_out = self.config.outlet_flow_rate
+        
+        return q_in - q_out
     
-    def outlet_flow_rate(self, water_height: float) -> float:
-        """Hitung laju aliran keluar berdasarkan ketinggian air (m³/s)"""
-        if not self.config.valve_open:
-            return 0.0
-            
-        if water_height <= 0.01:
-            return 0.0
-            
-        # Model Torricelli: v = Cd * sqrt(2gh)
-        outlet_velocity = self.config.discharge_coeff * np.sqrt(2 * self.config.g * max(0, water_height))
-        return self.config.outlet_area * outlet_velocity
-    
-    def net_flow_rate(self, water_height: float) -> float:
-        """Hitung laju aliran neto (m³/s)"""
-        Q_in = self.inlet_flow_rate(water_height)
-        Q_out = self.outlet_flow_rate(water_height)
-        return Q_in - Q_out
-    
-    def height_to_volume(self, height: float) -> float:
-        """Konversi ketinggian ke volume"""
-        return height * self.config.tank_area
+    def height_change_rate(self, height: float) -> float:
+        """Hitung laju perubahan ketinggian air dh/dt"""
+        net_flow = self.net_flow_rate(height)
+        if self.config.tank_area > 0:
+            return net_flow / self.config.tank_area
+        return 0.0
+
 
 # ====================
 # 3. SISTEM PERSAMAAN DIFERENSIAL
 # ====================
 
-class TankDifferentialEquations:
-    """Sistem persamaan diferensial untuk simulasi kontinu water tank"""
+class DifferentialEquations:
+    """Sistem persamaan diferensial untuk simulasi kontinu"""
     
-    def __init__(self, physics_model: WaterTankPhysics):
+    def __init__(self, physics_model: PhysicsModel):
         self.physics = physics_model
         self.config = physics_model.config
     
     def system_equations(self, t: float, y: np.ndarray) -> np.ndarray:
         """
         Sistem persamaan diferensial:
-        y = [water_height]
+        y = [height]
         
         Returns:
         dy/dt = [dh/dt]
         """
-        h = y[0]  # ketinggian air
+        height = y[0]
         
-        # Batasi ketinggian antara 0 dan tinggi maksimum
-        h = np.clip(h, 0, self.config.tank_height)
+        # Batasi height dalam rentang [0, tank_height] untuk stabilitas numerik
+        height = np.clip(height, 0, self.config.tank_height)
         
-        # Hitung laju aliran neto
-        Q_net = self.physics.net_flow_rate(h)
+        # Hitung laju perubahan ketinggian
+        dh_dt = self.physics.height_change_rate(height)
         
-        # Perubahan ketinggian: dh/dt = Q_net / A_tank
-        if self.config.tank_area > 0:
-            dh_dt = Q_net / self.config.tank_area
-        else:
-            dh_dt = 0.0
-            
-        # Jika ketinggian mencapai batas, set laju perubahan ke 0
-        if (h >= self.config.tank_height - 0.01 and dh_dt > 0) or (h <= 0.01 and dh_dt < 0):
-            dh_dt = 0.0
-            
         return np.array([dh_dt])
     
     def get_initial_conditions(self) -> np.ndarray:
         """Kondisi awal sistem"""
         return np.array([self.config.initial_height])
 
+
 # ====================
 # 4. SIMULATOR UTAMA
 # ====================
 
 class WaterTankSimulator:
-    """Simulator utama water tank"""
+    """Simulator utama proses pengisian/pengosongan tangki"""
     
     def __init__(self, config: TankConfig):
         self.config = config
-        self.physics = WaterTankPhysics(config)
-        self.equations = TankDifferentialEquations(self.physics)
+        self.physics = PhysicsModel(config)
+        self.equations = DifferentialEquations(self.physics)
         
         # Results storage
         self.time_history = None
         self.height_history = None
         self.volume_history = None
-        self.inflow_history = None
-        self.outflow_history = None
-        self.netflow_history = None
         self.results = None
     
     def run_simulation(self) -> Dict:
         """Jalankan simulasi"""
         # Setup time
         t_span = (0, self.config.simulation_time)
-        t_eval = np.arange(0, self.config.simulation_time, self.config.time_step)
+        t_eval = np.arange(0, self.config.simulation_time + self.config.time_step, 
+                           self.config.time_step)
         
         # Initial conditions
         y0 = self.equations.get_initial_conditions()
@@ -203,18 +182,8 @@ class WaterTankSimulator:
         
         # Store results
         self.time_history = solution.t
-        self.height_history = solution.y[0]
+        self.height_history = np.clip(solution.y[0], 0, self.config.tank_height)
         self.volume_history = self.height_history * self.config.tank_area
-        
-        # Calculate flow histories
-        self.inflow_history = np.zeros_like(self.time_history)
-        self.outflow_history = np.zeros_like(self.time_history)
-        self.netflow_history = np.zeros_like(self.time_history)
-        
-        for i, h in enumerate(self.height_history):
-            self.inflow_history[i] = self.physics.inlet_flow_rate(h)
-            self.outflow_history[i] = self.physics.outlet_flow_rate(h)
-            self.netflow_history[i] = self.inflow_history[i] - self.outflow_history[i]
         
         # Calculate metrics
         self.results = self._calculate_metrics()
@@ -222,62 +191,65 @@ class WaterTankSimulator:
         return self.results
     
     def _calculate_metrics(self) -> Dict:
-        """Hitung metrik kinerja water tank"""
+        """Hitung metrik kualitas simulasi"""
         if self.time_history is None:
             raise ValueError("Jalankan simulasi terlebih dahulu")
         
-        # Cari waktu mencapai penuh (ketinggian >= 95% dari maks)
-        full_indices = np.where(self.height_history >= 0.95 * self.config.tank_height)[0]
-        time_to_full = float(self.time_history[full_indices[0]]) if len(full_indices) > 0 else self.config.simulation_time
+        # Waktu untuk mencapai penuh/kosong
+        time_to_full = self._get_time_to_height(self.config.tank_height)
+        time_to_empty = self._get_time_to_height(0)
         
-        # Cari waktu mencapai kosong (ketinggian <= 5% dari maks)
-        empty_indices = np.where(self.height_history <= 0.05 * self.config.tank_height)[0]
-        time_to_empty = float(self.time_history[empty_indices[0]]) if len(empty_indices) > 0 else self.config.simulation_time
-        
-        # Cari waktu mencapai setengah
-        half_indices = np.where(self.height_history >= self.config.tank_height/2)[0]
-        time_to_half = float(self.time_history[half_indices[0]]) if len(half_indices) > 0 else self.config.simulation_time
+        # Volume maksimum teoritis
+        max_volume = self.config.tank_area * self.config.tank_height
         
         metrics = {
             # Time metrics
-            'time_to_empty': time_to_empty,
             'time_to_full': time_to_full,
-            'time_to_half': time_to_half,
+            'time_to_empty': time_to_empty,
+            'final_time': self.time_history[-1],
             
             # Height metrics
-            'max_height': float(np.max(self.height_history)),
-            'min_height': float(np.min(self.height_history)),
-            'final_height': float(self.height_history[-1]),
-            'avg_height': float(np.mean(self.height_history)),
+            'max_height': np.max(self.height_history),
+            'min_height': np.min(self.height_history),
+            'final_height': self.height_history[-1],
+            'height_percentage': (self.height_history[-1] / self.config.tank_height) * 100,
             
             # Volume metrics
-            'max_volume': float(np.max(self.volume_history)),
-            'min_volume': float(np.min(self.volume_history)),
-            'final_volume': float(self.volume_history[-1]),
+            'max_volume': np.max(self.volume_history),
+            'min_volume': np.min(self.volume_history),
+            'final_volume': self.volume_history[-1],
+            'volume_percentage': (self.volume_history[-1] / max_volume) * 100,
             
-            # Flow metrics (konversi ke m³/jam untuk readability)
-            'max_inflow': float(np.max(self.inflow_history) * 3600),
-            'max_outflow': float(np.max(self.outflow_history) * 3600),
-            'avg_inflow': float(np.mean(self.inflow_history) * 3600),
-            'avg_outflow': float(np.mean(self.outflow_history) * 3600),
-            
-            # Total volume (integral)
-            'total_inflow': float(np.trapezoid(self.inflow_history, self.time_history)),
-            'total_outflow': float(np.trapezoid(self.outflow_history, self.time_history)),
-            'net_volume_change': float(self.volume_history[-1] - self.volume_history[0]),
+            # Flow metrics
+            'total_inflow': self.config.inlet_flow_rate * self.time_history[-1],
+            'total_outflow': self.config.outlet_flow_rate * self.time_history[-1],
+            'net_flow': (self.config.inlet_flow_rate - self.config.outlet_flow_rate) * self.time_history[-1],
         }
         
         return metrics
+    
+    def _get_time_to_height(self, target_height: float) -> Optional[float]:
+        """Waktu untuk mencapai ketinggian tertentu"""
+        if target_height == 0:
+            # Mencari waktu ketika height mendekati 0 (dengan toleransi)
+            indices = np.where(self.height_history <= 0.01)[0]
+        else:
+            indices = np.where(self.height_history >= target_height - 0.01)[0]
+        
+        if len(indices) > 0:
+            return self.time_history[indices[0]]
+        return None
+
 
 # ====================
 # 5. VISUALISASI dengan PLOTLY
 # ====================
 
-class PlotlyWaterTankViz:
-    """Kelas untuk visualisasi water tank dengan Plotly"""
+class PlotlyVisualization:
+    """Kelas untuk visualisasi hasil simulasi dengan Plotly"""
     
     @staticmethod
-    def plot_height_profile(simulator: WaterTankSimulator, title_prefix=""):
+    def plot_height_profile(simulator: WaterTankSimulator):
         """Plot profil ketinggian air"""
         fig = go.Figure()
         
@@ -292,88 +264,38 @@ class PlotlyWaterTankViz:
             mode='lines',
             name='Ketinggian Air',
             line=dict(color='blue', width=3),
-            hovertemplate='Waktu: %{x:.1f} detik<br>Ketinggian: %{y:.2f} m<extra></extra>'
-        ))
-        
-        # Tambah area fill
-        fig.add_trace(go.Scatter(
-            x=time,
-            y=height,
             fill='tozeroy',
-            mode='none',
-            name='Volume Air',
             fillcolor='rgba(0,0,255,0.1)',
-            showlegend=False,
-            hoverinfo='skip'
+            hovertemplate='Waktu: %{x:.1f} detik<br>Ketinggian: %{y:.2f} m<extra></extra>'
         ))
         
         # Tambah garis referensi
         fig.add_hline(y=config.tank_height, line_dash="dash", 
                      line_color="red", opacity=0.7,
-                     annotation_text=f"Tinggi Maks ({config.tank_height:.1f} m)")
+                     annotation_text=f"Tinggi Maks ({config.tank_height} m)")
         
-        fig.add_hline(y=0, line_dash="dash", 
-                     line_color="green", opacity=0.7,
-                     annotation_text="Tank Kosong")
+        # Tambah garis waktu ke penuh/kosong
+        if simulator.results['time_to_full']:
+            t_full = simulator.results['time_to_full']
+            fig.add_vline(x=t_full, line_dash="dot", line_color="green", opacity=0.7,
+                         annotation_text=f"Penuh: {t_full:.1f} detik")
+        
+        if simulator.results['time_to_empty']:
+            t_empty = simulator.results['time_to_empty']
+            fig.add_vline(x=t_empty, line_dash="dot", line_color="orange", opacity=0.7,
+                         annotation_text=f"Kosong: {t_empty:.1f} detik")
         
         # Update layout
-        title = f'{title_prefix} - Profil Ketinggian Air' if title_prefix else 'Profil Ketinggian Air dalam Tank'
         fig.update_layout(
             title=dict(
-                text=title,
-                font=dict(size=18, family="Arial, sans-serif", color="darkblue")
+                text='Profil Ketinggian Air dalam Tangki',
+                font=dict(size=20, family="Arial, sans-serif", color="darkblue")
             ),
             xaxis_title="Waktu (detik)",
             yaxis_title="Ketinggian Air (m)",
             hovermode="x unified",
             showlegend=True,
-            height=400,
-            template="plotly_white"
-        )
-        
-        return fig
-    
-    @staticmethod
-    def plot_flow_rates(simulator: WaterTankSimulator):
-        """Plot laju aliran masuk dan keluar"""
-        fig = go.Figure()
-        
-        time = simulator.time_history
-        inflow = simulator.inflow_history * 3600  # m³/h
-        outflow = simulator.outflow_history * 3600  # m³/h
-        netflow = simulator.netflow_history * 3600  # m³/h
-        
-        fig.add_trace(go.Scatter(
-            x=time, y=inflow,
-            mode='lines', name='Aliran Masuk',
-            line=dict(color='green', width=2.5),
-            hovertemplate='Waktu: %{x:.1f} detik<br>Q_in: %{y:.2f} m³/h<extra></extra>'
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=time, y=outflow,
-            mode='lines', name='Aliran Keluar',
-            line=dict(color='red', width=2.5),
-            hovertemplate='Waktu: %{x:.1f} detik<br>Q_out: %{y:.2f} m³/h<extra></extra>'
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=time, y=netflow,
-            mode='lines', name='Aliran Neto',
-            line=dict(color='purple', width=2, dash='dot'),
-            hovertemplate='Waktu: %{x:.1f} detik<br>Q_net: %{y:.2f} m³/h<extra></extra>'
-        ))
-        
-        fig.update_layout(
-            title=dict(
-                text='Profil Laju Aliran',
-                font=dict(size=18, family="Arial, sans-serif", color="darkblue")
-            ),
-            xaxis_title="Waktu (detik)",
-            yaxis_title="Laju Aliran (m³/jam)",
-            hovermode="x unified",
-            showlegend=True,
-            height=400,
+            height=500,
             template="plotly_white"
         )
         
@@ -381,282 +303,580 @@ class PlotlyWaterTankViz:
     
     @staticmethod
     def plot_volume_profile(simulator: WaterTankSimulator):
-        """Plot profil volume"""
+        """Plot profil volume air"""
         fig = go.Figure()
         
         time = simulator.time_history
         volume = simulator.volume_history
         config = simulator.config
+        max_volume = config.tank_area * config.tank_height
         
+        # Tambah garis volume
         fig.add_trace(go.Scatter(
-            x=time, y=volume,
-            mode='lines', name='Volume Air',
-            line=dict(color='purple', width=3),
+            x=time, 
+            y=volume,
+            mode='lines',
+            name='Volume Air',
+            line=dict(color='green', width=3),
             fill='tozeroy',
-            fillcolor='rgba(128,0,128,0.1)',
+            fillcolor='rgba(0,255,0,0.1)',
             hovertemplate='Waktu: %{x:.1f} detik<br>Volume: %{y:.2f} m³<extra></extra>'
         ))
         
-        fig.add_hline(y=config.max_volume, line_dash="dash", 
+        # Tambah garis referensi
+        fig.add_hline(y=max_volume, line_dash="dash", 
                      line_color="red", opacity=0.7,
-                     annotation_text=f"Volume Maks ({config.max_volume:.2f} m³)")
+                     annotation_text=f"Volume Maks ({max_volume:.2f} m³)")
         
+        # Update layout
         fig.update_layout(
             title=dict(
-                text='Profil Volume Air dalam Tank',
-                font=dict(size=18, family="Arial, sans-serif", color="darkblue")
+                text='Profil Volume Air dalam Tangki',
+                font=dict(size=20, family="Arial, sans-serif", color="darkgreen")
             ),
             xaxis_title="Waktu (detik)",
-            yaxis_title="Volume (m³)",
+            yaxis_title="Volume Air (m³)",
             hovermode="x unified",
             showlegend=True,
-            height=400,
+            height=500,
             template="plotly_white"
         )
         
         return fig
-
-# ====================
-# 6. ANALISIS SKENARIO
-# ====================
-
-class ScenarioAnalysis:
-    """Analisis berbagai skenario water tank"""
     
     @staticmethod
-    def analyze_filling_only(base_config: TankConfig):
-        """Analisis skenario hanya pengisian"""
-        config = base_config.copy()
-        config.valve_open = False
-        config.pump_on = True
+    def plot_comparison_chart(simulators: List[WaterTankSimulator], 
+                               labels: List[str]):
+        """Plot perbandingan beberapa simulasi"""
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=('Perbandingan Profil Ketinggian', 
+                           'Perbandingan Profil Volume',
+                           'Debit Aliran', 
+                           'Waktu Pengisian/Pengosongan'),
+            vertical_spacing=0.15,
+            horizontal_spacing=0.1
+        )
         
-        simulator = WaterTankSimulator(config)
-        simulator.run_simulation()
-        return simulator
-    
-    @staticmethod
-    def analyze_emptying_only(base_config: TankConfig):
-        """Analisis skenario hanya pengosongan"""
-        config = base_config.copy()
-        config.pump_on = False
-        config.valve_open = True
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
         
-        simulator = WaterTankSimulator(config)
-        simulator.run_simulation()
-        return simulator
-    
-    @staticmethod
-    def analyze_simultaneous(base_config: TankConfig):
-        """Analisis skenario pengisian dan pengosongan bersamaan"""
-        config = base_config.copy()
-        config.pump_on = True
-        config.valve_open = True
+        # Plot 1: Height comparison
+        for i, sim in enumerate(simulators):
+            fig.add_trace(
+                go.Scatter(
+                    x=sim.time_history,
+                    y=sim.height_history,
+                    mode='lines',
+                    name=labels[i],
+                    line=dict(color=colors[i % len(colors)], width=2),
+                    showlegend=True if i == 0 else False,
+                    hovertemplate='Waktu: %{x:.1f} detik<br>Ketinggian: %{y:.2f} m<extra>' + labels[i] + '</extra>'
+                ),
+                row=1, col=1
+            )
         
-        simulator = WaterTankSimulator(config)
-        simulator.run_simulation()
-        return simulator
+        # Plot 2: Volume comparison
+        for i, sim in enumerate(simulators):
+            fig.add_trace(
+                go.Scatter(
+                    x=sim.time_history,
+                    y=sim.volume_history,
+                    mode='lines',
+                    name=labels[i],
+                    line=dict(color=colors[i % len(colors)], width=2),
+                    showlegend=False,
+                    hovertemplate='Waktu: %{x:.1f} detik<br>Volume: %{y:.2f} m³<extra>' + labels[i] + '</extra>'
+                ),
+                row=1, col=2
+            )
+        
+        # Plot 3: Flow rates (bar chart)
+        for i, sim in enumerate(simulators):
+            config = sim.config
+            fig.add_trace(
+                go.Bar(
+                    name=labels[i],
+                    x=['Inlet', 'Outlet'],
+                    y=[config.inlet_flow_rate, config.outlet_flow_rate],
+                    marker_color=colors[i % len(colors)],
+                    opacity=0.7,
+                    showlegend=False,
+                    hovertemplate='Debit: %{y:.3f} m³/detik<extra>' + labels[i] + '</extra>'
+                ),
+                row=2, col=1
+            )
+        
+        # Plot 4: Time to full/empty
+        metrics = ['time_to_full', 'time_to_empty']
+        metric_labels = ['Waktu ke Penuh', 'Waktu ke Kosong']
+        
+        for i, sim in enumerate(simulators):
+            values = [sim.results[metric] or 0 for metric in metrics]
+            fig.add_trace(
+                go.Bar(
+                    name=labels[i],
+                    x=metric_labels,
+                    y=values,
+                    marker_color=colors[i % len(colors)],
+                    opacity=0.7,
+                    showlegend=False,
+                    hovertemplate='Nilai: %{y:.1f} detik<extra>' + labels[i] + '</extra>'
+                ),
+                row=2, col=2
+            )
+        
+        # Update layout
+        fig.update_layout(
+            height=800,
+            showlegend=True,
+            barmode='group',
+            hovermode="closest",
+            template="plotly_white"
+        )
+        
+        # Update axis labels
+        fig.update_xaxes(title_text="Waktu (detik)", row=1, col=1)
+        fig.update_xaxes(title_text="Waktu (detik)", row=1, col=2)
+        fig.update_yaxes(title_text="Ketinggian (m)", row=1, col=1)
+        fig.update_yaxes(title_text="Volume (m³)", row=1, col=2)
+        fig.update_yaxes(title_text="Debit (m³/detik)", row=2, col=1)
+        fig.update_yaxes(title_text="Waktu (detik)", row=2, col=2)
+        
+        return fig
+
 
 # ====================
-# 7. APLIKASI STREAMLIT
+# 6. ANALISIS SENSITIVITAS
+# ====================
+
+class SensitivityAnalysis:
+    """Analisis sensitivitas parameter"""
+    
+    @staticmethod
+    def analyze_parameter_sensitivity(base_config: TankConfig,
+                                      parameter_name: str,
+                                      values: List[float]) -> Dict:
+        """Analisis sensitivitas untuk satu parameter"""
+        results = []
+        
+        # Progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, value in enumerate(values):
+            status_text.text(f"Menganalisis {parameter_name} = {value:.3f}...")
+            
+            # Create new config with modified parameter
+            config = base_config.copy()
+            config.update_parameter(parameter_name, value)
+            
+            # Run simulation
+            simulator = WaterTankSimulator(config)
+            metrics = simulator.run_simulation()
+            
+            results.append({
+                'value': value,
+                'simulator': simulator,
+                'metrics': metrics
+            })
+            
+            # Update progress
+            progress_bar.progress((i + 1) / len(values))
+        
+        status_text.empty()
+        progress_bar.empty()
+        
+        return {
+            'parameter': parameter_name,
+            'results': results
+        }
+
+
+# ====================
+# 7. FUNGSI STREAMLIT
 # ====================
 
 def create_sidebar():
     """Buat sidebar untuk input parameter"""
-    st.sidebar.title("⚙️ Parameter Water Tank")
+    st.sidebar.title("⚙️ Parameter Tangki Air")
     
-    st.sidebar.subheader("📐 Geometri Tank")
-    tank_height = st.sidebar.slider("Tinggi Tank (m)", 1.0, 5.0, 3.0, 0.5)
-    tank_diameter = st.sidebar.slider("Diameter Tank (m)", 0.5, 4.0, 2.0, 0.1)
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📏 Dimensi Tangki")
     
-    st.sidebar.subheader("🔧 Parameter Pipa")
-    inlet_diameter = st.sidebar.slider("Diameter Pipa Inlet (m)", 0.05, 0.3, 0.15, 0.01)
-    outlet_diameter = st.sidebar.slider("Diameter Pipa Outlet (m)", 0.05, 0.3, 0.15, 0.01)
-    
-    st.sidebar.subheader("💧 Parameter Aliran")
-    inlet_velocity = st.sidebar.slider("Kecepatan Aliran Masuk (m/s)", 0.5, 3.0, 2.0, 0.1)
-    outlet_velocity = st.sidebar.slider("Kecepatan Aliran Keluar (m/s)", 0.5, 3.0, 2.0, 0.1)
-    discharge_coeff = st.sidebar.slider("Koefisien Discharge", 0.3, 0.9, 0.6, 0.05)
-    
-    st.sidebar.subheader("⏱️ Kondisi Awal")
-    initial_height = st.sidebar.slider("Ketinggian Awal Air (m)", 0.0, tank_height, 0.5, 0.1)
-    
-    st.sidebar.subheader("🎮 Kontrol Operasi")
     col1, col2 = st.sidebar.columns(2)
     with col1:
-        pump_on = st.checkbox("Pompa Menyala", value=True)
+        tank_height = st.number_input("Tinggi Tangki (m)", 
+                                      min_value=0.5, max_value=10.0, value=2.0, step=0.1)
     with col2:
-        valve_open = st.checkbox("Valve Terbuka", value=True)
+        tank_radius = st.number_input("Radius Tangki (m)", 
+                                      min_value=0.3, max_value=5.0, value=1.0, step=0.1)
     
-    st.sidebar.subheader("⏲️ Parameter Simulasi")
-    simulation_time = st.sidebar.slider("Waktu Simulasi (detik)", 100, 1200, 600, 50)
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("💧 Debit Aliran")
+    
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        inlet_flow_rate = st.number_input("Debit Inlet (m³/detik)", 
+                                          min_value=0.0, max_value=1.0, value=0.05, step=0.01,
+                                          format="%.3f")
+    with col2:
+        outlet_flow_rate = st.number_input("Debit Outlet (m³/detik)", 
+                                           min_value=0.0, max_value=1.0, value=0.03, step=0.01,
+                                           format="%.3f")
+    
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("⏱️ Kondisi Awal & Simulasi")
+    
+    initial_height = st.sidebar.slider("Ketinggian Awal (m)", 
+                                       0.0, tank_height, 0.0, 0.1)
+    
+    simulation_time = st.sidebar.slider("Waktu Simulasi (detik)", 
+                                        30, 3600, 300, 30)
+    
+    # Hitung informasi tangki
+    tank_area = math.pi * (tank_radius ** 2)
+    max_volume = tank_area * tank_height
+    
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📊 Informasi Tangki")
+    st.sidebar.info(f"""
+    **Luas Penampang:** {tank_area:.2f} m²
+    **Volume Maks:** {max_volume:.2f} m³
+    **Kapasitas:** {max_volume * 1000:.0f} liter
+    """)
     
     # Buat konfigurasi
     config = TankConfig(
         tank_height=tank_height,
-        tank_diameter=tank_diameter,
-        inlet_diameter=inlet_diameter,
-        outlet_diameter=outlet_diameter,
-        inlet_velocity=inlet_velocity,
-        outlet_velocity=outlet_velocity,
+        tank_radius=tank_radius,
+        inlet_flow_rate=inlet_flow_rate,
+        outlet_flow_rate=outlet_flow_rate,
         initial_height=initial_height,
-        discharge_coeff=discharge_coeff,
-        pump_on=pump_on,
-        valve_open=valve_open,
         simulation_time=float(simulation_time)
     )
     
     return config
 
+
 def display_results(simulator, results):
     """Tampilkan hasil simulasi dalam metric cards"""
+    
+    # Hitung debit bersih
+    net_flow = simulator.config.inlet_flow_rate - simulator.config.outlet_flow_rate
+    
+    # Metric cards
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("Waktu ke Penuh", f"{results['time_to_full']:.1f} detik")
-        st.metric("Ketinggian Akhir", f"{results['final_height']:.2f} m")
+        st.metric(
+            label="⏱️ Waktu ke Penuh",
+            value=f"{results['time_to_full']:.1f} detik" if results['time_to_full'] else "Tidak tercapai",
+            delta=f"{results['time_to_full']/60:.2f} menit" if results['time_to_full'] else None,
+            delta_color="normal"
+        )
+        st.metric(
+            label="📏 Ketinggian Akhir",
+            value=f"{results['final_height']:.2f} m",
+            delta=f"{results['height_percentage']:.1f}% dari maks"
+        )
     
     with col2:
-        st.metric("Waktu ke Kosong", f"{results['time_to_empty']:.1f} detik")
-        st.metric("Volume Akhir", f"{results['final_volume']:.2f} m³")
+        st.metric(
+            label="⏱️ Waktu ke Kosong",
+            value=f"{results['time_to_empty']:.1f} detik" if results['time_to_empty'] else "Tidak tercapai",
+            delta=f"{results['time_to_empty']/60:.2f} menit" if results['time_to_empty'] else None,
+            delta_color="inverse"
+        )
+        st.metric(
+            label="💧 Volume Akhir",
+            value=f"{results['final_volume']:.2f} m³",
+            delta=f"{results['volume_percentage']:.1f}% dari maks"
+        )
     
     with col3:
-        st.metric("Max Aliran Masuk", f"{results['max_inflow']:.2f} m³/jam")
-        st.metric("Max Aliran Keluar", f"{results['max_outflow']:.2f} m³/jam")
+        st.metric(
+            label="📈 Ketinggian Maks",
+            value=f"{results['max_height']:.2f} m"
+        )
+        st.metric(
+            label="📈 Volume Maks",
+            value=f"{results['max_volume']:.2f} m³"
+        )
     
     with col4:
-        st.metric("Total Air Masuk", f"{results['total_inflow']:.2f} m³")
-        st.metric("Total Air Keluar", f"{results['total_outflow']:.2f} m³")
+        st.metric(
+            label="🔄 Debit Bersih",
+            value=f"{net_flow:.3f} m³/detik",
+            delta="Mengisi" if net_flow > 0 else "Mengosongkan" if net_flow < 0 else "Stabil"
+        )
+        st.metric(
+            label="⏱️ Waktu Simulasi",
+            value=f"{simulator.config.simulation_time:.0f} detik"
+        )
+    
+    # Status bar
+    if net_flow > 0:
+        if results['time_to_full']:
+            st.success(f"✅ Tangki akan PENUH dalam {results['time_to_full']:.1f} detik")
+        else:
+            st.info(f"ℹ️ Tangki menuju PENUH (saat ini {results['height_percentage']:.1f}%)")
+    elif net_flow < 0:
+        if results['time_to_empty']:
+            st.warning(f"⚠️ Tangki akan KOSONG dalam {results['time_to_empty']:.1f} detik")
+        else:
+            st.info(f"ℹ️ Tangki menuju KOSONG (sisa {results['height_percentage']:.1f}%)")
+    else:
+        st.info(f"ℹ️ Ketinggian air STABIL pada {results['final_height']:.2f} m")
+
 
 def main():
     """Aplikasi utama Streamlit"""
-    st.set_page_config(
-        page_title="Simulasi Water Tank",
-        page_icon="💧",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
     
     # Header
-    st.title("💧 Simulasi Kontinu Water Tank System")
+    st.title("💧 Simulasi Kontinu Sistem Tangki Air")
     st.markdown("""
-    Aplikasi ini mensimulasikan sistem water tank (pam air) secara kontinu menggunakan model fisika fluida.
-    Semua parameter dapat disesuaikan di sidebar.
+    Aplikasi ini mensimulasikan proses **pengisian dan pengosongan tangki air** secara kontinu.
+    Sesuaikan parameter di sidebar dan lihat hasil simulasi secara real-time.
     """)
     
     # Sidebar untuk input parameter
     config = create_sidebar()
     
-    # Informasi debit
-    col1, col2 = st.columns(2)
-    with col1:
-        debit_inlet = config.inlet_area * config.inlet_velocity * 3600
-        st.info(f"💧 **Debit Inlet**: {debit_inlet:.2f} m³/jam")
-    with col2:
-        debit_outlet = config.outlet_area * config.outlet_velocity * 3600
-        st.info(f"💧 **Debit Outlet**: {debit_outlet:.2f} m³/jam")
-    
     # Jalankan simulasi
-    with st.spinner("Menjalankan simulasi..."):
+    with st.spinner("⏳ Menjalankan simulasi..."):
         simulator = WaterTankSimulator(config)
         results = simulator.run_simulation()
     
-    st.success("✅ Simulasi selesai!")
-    
     # Tampilkan hasil
+    st.success("✅ Simulasi selesai!")
     display_results(simulator, results)
     
     # Tab untuk visualisasi
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "📈 Profil Ketinggian", 
-        "📊 Metrik & Aliran", 
-        "🔄 Analisis Skenario"
+        "📊 Profil Volume", 
+        "🔍 Analisis Sensitivitas", 
+        "📋 Data & Parameter"
     ])
     
     with tab1:
         st.subheader("Profil Ketinggian Air")
-        
-        # Plot height profile
-        fig_height = PlotlyWaterTankViz.plot_height_profile(simulator)
+        fig_height = PlotlyVisualization.plot_height_profile(simulator)
         st.plotly_chart(fig_height, use_container_width=True)
         
         # Informasi tambahan
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Ketinggian Maks", f"{results['max_height']:.2f} m")
-        with col2:
-            st.metric("Ketinggian Min", f"{results['min_height']:.2f} m")
-        with col3:
-            st.metric("Ketinggian Rata-rata", f"{results['avg_height']:.2f} m")
+        with st.expander("ℹ️ Penjelasan Profil Ketinggian"):
+            st.markdown("""
+            **Rumus perubahan ketinggian:**
+            - **Pengisian saja:** `h(t) = h₀ + (Q_in/A) × t` (linear naik)
+            - **Pengosongan saja:** `h(t) = h₀ - (Q_out/A) × t` (linear turun)
+            - **Bersamaan:** `h(t) = h₀ + ((Q_in - Q_out)/A) × t`
+            
+            **Keterangan:**
+            - `h₀` = ketinggian awal (m)
+            - `Q_in` = debit inlet (m³/detik)
+            - `Q_out` = debit outlet (m³/detik)
+            - `A` = luas penampang tangki (m²)
+            """)
     
     with tab2:
-        st.subheader("Laju Aliran")
-        
-        # Plot flow rates
-        fig_flow = PlotlyWaterTankViz.plot_flow_rates(simulator)
-        st.plotly_chart(fig_flow, use_container_width=True)
-        
-        # Plot volume
-        st.subheader("Profil Volume")
-        fig_volume = PlotlyWaterTankViz.plot_volume_profile(simulator)
+        st.subheader("Profil Volume Air")
+        fig_volume = PlotlyVisualization.plot_volume_profile(simulator)
         st.plotly_chart(fig_volume, use_container_width=True)
         
-        # Tabel metrik
-        st.subheader("Metrik Kinerja Detail")
-        metrics_df = pd.DataFrame([
-            {"Metrik": "Waktu ke Penuh (detik)", "Nilai": f"{results['time_to_full']:.1f}"},
-            {"Metrik": "Waktu ke Kosong (detik)", "Nilai": f"{results['time_to_empty']:.1f}"},
-            {"Metrik": "Waktu ke Setengah (detik)", "Nilai": f"{results['time_to_half']:.1f}"},
-            {"Metrik": "Ketinggian Maks (m)", "Nilai": f"{results['max_height']:.2f}"},
-            {"Metrik": "Ketinggian Min (m)", "Nilai": f"{results['min_height']:.2f}"},
-            {"Metrik": "Volume Maks (m³)", "Nilai": f"{results['max_volume']:.2f}"},
-            {"Metrik": "Volume Min (m³)", "Nilai": f"{results['min_volume']:.2f}"},
-            {"Metrik": "Max Aliran Masuk (m³/jam)", "Nilai": f"{results['max_inflow']:.2f}"},
-            {"Metrik": "Max Aliran Keluar (m³/jam)", "Nilai": f"{results['max_outflow']:.2f}"},
-            {"Metrik": "Total Air Masuk (m³)", "Nilai": f"{results['total_inflow']:.2f}"},
-            {"Metrik": "Total Air Keluar (m³)", "Nilai": f"{results['total_outflow']:.2f}"},
-        ])
-        st.dataframe(metrics_df, use_container_width=True, hide_index=True)
-    
-    with tab3:
-        st.subheader("Analisis Berbagai Skenario")
+        # Progress bars
+        st.subheader("📊 Status Kapasitas")
         
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.info("**Skenario 1: Hanya Pengisian**")
-            if st.button("Jalankan Skenario 1", key="btn1"):
-                with st.spinner("Menjalankan simulasi pengisian..."):
-                    filling_sim = ScenarioAnalysis.analyze_filling_only(config)
-                    fig = PlotlyWaterTankViz.plot_height_profile(filling_sim, "Pengisian")
-                    st.plotly_chart(fig, use_container_width=True)
-                    st.success(f"✅ Waktu mencapai penuh: {filling_sim.results['time_to_full']:.1f} detik")
-                    st.metric("Volume Akhir", f"{filling_sim.results['final_volume']:.2f} m³")
+            vol_percent = results['volume_percentage']
+            st.progress(min(vol_percent/100, 1.0), 
+                       text=f"**Volume Saat Ini:** {results['final_volume']:.2f} m³ ({vol_percent:.1f}%)")
+            
+            if vol_percent >= 95:
+                st.success("✅ Tangki hampir penuh")
+            elif vol_percent >= 75:
+                st.info("ℹ️ Kapasitas mencukupi")
+            elif vol_percent >= 50:
+                st.warning("⚠️ Kapasitas menengah")
+            else:
+                st.error("❌ Kapasitas rendah")
         
         with col2:
-            st.warning("**Skenario 2: Hanya Pengosongan**")
-            if st.button("Jalankan Skenario 2", key="btn2"):
-                with st.spinner("Menjalankan simulasi pengosongan..."):
-                    emptying_config = config.copy()
-                    emptying_config.initial_height = config.tank_height
-                    emptying_sim = ScenarioAnalysis.analyze_emptying_only(emptying_config)
-                    fig = PlotlyWaterTankViz.plot_height_profile(emptying_sim, "Pengosongan")
-                    st.plotly_chart(fig, use_container_width=True)
-                    st.success(f"✅ Waktu mencapai kosong: {emptying_sim.results['time_to_empty']:.1f} detik")
-                    st.metric("Volume Akhir", f"{emptying_sim.results['final_volume']:.2f} m³")
+            if results['time_to_full']:
+                fill_progress = min(simulator.time_history[-1] / results['time_to_full'], 1.0)
+                st.progress(fill_progress, 
+                           text=f"**Progres Pengisian:** {fill_progress*100:.1f}%")
         
         with col3:
-            st.success("**Skenario 3: Pengisian & Pengosongan**")
-            if st.button("Jalankan Skenario 3", key="btn3"):
-                with st.spinner("Menjalankan simulasi bersamaan..."):
-                    simultaneous_sim = ScenarioAnalysis.analyze_simultaneous(config)
-                    fig = PlotlyWaterTankViz.plot_height_profile(simultaneous_sim, "Bersamaan")
-                    st.plotly_chart(fig, use_container_width=True)
-                    st.success(f"✅ Ketinggian akhir: {simultaneous_sim.results['final_height']:.2f} m")
-                    st.metric("Volume Akhir", f"{simultaneous_sim.results['final_volume']:.2f} m³")
+            if results['time_to_empty']:
+                empty_progress = min(simulator.time_history[-1] / results['time_to_empty'], 1.0)
+                st.progress(empty_progress, 
+                           text=f"**Progres Pengosongan:** {empty_progress*100:.1f}%")
+    
+    with tab3:
+        st.subheader("🔍 Analisis Sensitivitas Parameter")
+        
+        # Pilih parameter untuk analisis sensitivitas
+        param_options = {
+            "Radius Tangki (m)": "tank_radius",
+            "Tinggi Tangki (m)": "tank_height", 
+            "Debit Inlet (m³/detik)": "inlet_flow_rate",
+            "Debit Outlet (m³/detik)": "outlet_flow_rate"
+        }
+        
+        selected_param = st.selectbox(
+            "Pilih parameter untuk analisis sensitivitas:",
+            list(param_options.keys())
+        )
+        
+        param_name = param_options[selected_param]
+        
+        # Buat range nilai berdasarkan parameter
+        base_val = getattr(config, param_name)
+        
+        if "radius" in param_name or "tinggi" in param_name:
+            # Untuk dimensi, buat range di sekitar nilai dasar
+            values = [
+                base_val * 0.5,
+                base_val * 0.75,
+                base_val,
+                base_val * 1.25,
+                base_val * 1.5,
+                base_val * 1.75,
+                base_val * 2.0
+            ]
+        else:
+            # Untuk debit, buat range dari 0 sampai 2× nilai dasar
+            values = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]
+        
+        # Pilih metrik yang akan dianalisis
+        metric_options = {
+            "Waktu ke Penuh": "time_to_full",
+            "Waktu ke Kosong": "time_to_empty",
+            "Ketinggian Akhir": "final_height",
+            "Volume Akhir": "final_volume"
+        }
+        
+        selected_metric = st.selectbox(
+            "Pilih metrik yang dianalisis:",
+            list(metric_options.keys())
+        )
+        metric_name = metric_options[selected_metric]
+        
+        # Jalankan analisis
+        if st.button("🚀 Jalankan Analisis Sensitivitas", type="primary"):
+            with st.spinner(f"Menjalankan analisis untuk {selected_param}..."):
+                analysis = SensitivityAnalysis.analyze_parameter_sensitivity(
+                    config, param_name, values
+                )
+                
+                # Buat dataframe hasil
+                analysis_data = []
+                for result in analysis['results']:
+                    val = result['metrics'][metric_name]
+                    analysis_data.append({
+                        'Nilai': result['value'],
+                        selected_metric: val if val is not None else 0
+                    })
+                
+                df_analysis = pd.DataFrame(analysis_data)
+                
+                # Tampilkan tabel
+                st.dataframe(df_analysis.style.format({
+                    selected_metric: '{:.2f}'
+                }), use_container_width=True)
+                
+                # Buat grafik sensitivitas
+                fig_sens = go.Figure()
+                
+                fig_sens.add_trace(go.Scatter(
+                    x=df_analysis['Nilai'],
+                    y=df_analysis[selected_metric],
+                    mode='lines+markers',
+                    name=selected_metric,
+                    line=dict(color='red', width=3),
+                    marker=dict(size=10, color='blue'),
+                    hovertemplate=f'{selected_param}: %{{x:.2f}}<br>{selected_metric}: %{{y:.2f}}<extra></extra>'
+                ))
+                
+                fig_sens.update_layout(
+                    title=f"Sensitivitas {selected_param} terhadap {selected_metric}",
+                    xaxis_title=selected_param,
+                    yaxis_title=selected_metric,
+                    hovermode="x unified",
+                    template="plotly_white",
+                    height=500
+                )
+                
+                st.plotly_chart(fig_sens, use_container_width=True)
+    
+    with tab4:
+        st.subheader("📋 Data Simulasi")
+        
+        # Buat dataframe dari hasil
+        data = {
+            'Waktu (detik)': simulator.time_history,
+            'Ketinggian Air (m)': simulator.height_history,
+            'Volume Air (m³)': simulator.volume_history,
+            'Persentase Ketinggian (%)': (simulator.height_history / config.tank_height) * 100,
+            'Persentase Volume (%)': (simulator.volume_history / (config.tank_area * config.tank_height)) * 100
+        }
+        
+        df = pd.DataFrame(data)
+        
+        # Tampilkan tabel
+        st.dataframe(
+            df.style.format({
+                'Waktu (detik)': '{:.1f}',
+                'Ketinggian Air (m)': '{:.2f}',
+                'Volume Air (m³)': '{:.2f}',
+                'Persentase Ketinggian (%)': '{:.1f}%',
+                'Persentase Volume (%)': '{:.1f}%'
+            }),
+            use_container_width=True,
+            height=400
+        )
+        
+        # Download button
+        csv = df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Data sebagai CSV",
+            data=csv,
+            file_name=f"data_tangki_{config.tank_height}m_{config.tank_radius}m.csv",
+            mime="text/csv"
+        )
+        
+        # Tampilkan parameter simulasi
+        with st.expander("📋 Parameter Simulasi Lengkap"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Dimensi Tangki:**")
+                st.write(f"- Tinggi: {config.tank_height} m")
+                st.write(f"- Radius: {config.tank_radius} m")
+                st.write(f"- Luas Penampang: {config.tank_area:.2f} m²")
+                st.write(f"- Volume Maks: {config.max_volume:.2f} m³")
+                st.write(f"- Kapasitas: {config.max_volume * 1000:.0f} liter")
+            
+            with col2:
+                st.markdown("**Parameter Aliran:**")
+                st.write(f"- Debit Inlet: {config.inlet_flow_rate} m³/detik")
+                st.write(f"- Debit Outlet: {config.outlet_flow_rate} m³/detik")
+                st.write(f"- Debit Bersih: {config.inlet_flow_rate - config.outlet_flow_rate:.3f} m³/detik")
+                st.write(f"- Ketinggian Awal: {config.initial_height} m")
+                st.write(f"- Waktu Simulasi: {config.simulation_time} detik")
     
     # Footer
     st.markdown("---")
-    st.markdown("© 2026 - Simulasi Water Tank System | Praktikum MODSIM")
+    st.markdown("""
+    <div style='text-align: center'>
+        <p>© 2026 - Simulasi Kontinu Sistem Tangki Air | Praktikum Pemodelan dan Simulasi</p>
+        <p style='font-size: 0.8em; color: gray;'>Institut Teknologi Del</p>
+    </div>
+    """, unsafe_allow_html=True)
+
 
 if __name__ == "__main__":
     main()
